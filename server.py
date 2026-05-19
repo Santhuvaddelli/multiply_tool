@@ -1,16 +1,15 @@
 import os
 import mcp.types as types
 from mcp.server import Server
-from mcp.server.streamable_http import StreamableHttpServerTransport
+from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
-from starlette.routing import Route
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
+from starlette.routing import Route, Mount
 
-# -------------------------
-# MCP SERVER
-# -------------------------
+# MCP Server
 server = Server("simple-multiplier")
 
-# LIST TOOLS
 @server.list_tools()
 async def list_tools():
     return [
@@ -27,37 +26,51 @@ async def list_tools():
         )
     ]
 
-# CALL TOOL
 @server.call_tool()
 async def call_tool(name: str, arguments: dict):
-    if name != "multiply_by_two":
-        raise ValueError("Unknown tool")
-
     number = arguments.get("number", 0)
-    result = number * 2
-
     return [
         types.TextContent(
             type="text",
-            text=str(result)
+            text=str(number * 2)
         )
     ]
 
 
-# -------------------------
-# STREAMABLE HTTP
-# -------------------------
-transport = StreamableHttpServerTransport(server, path="/mcp")
+# SSE Transport (STABLE VERSION)
+sse = SseServerTransport("/messages")
 
+async def handle_sse(request):
+    async with sse.connect_sse(
+        request.scope,
+        request.receive,
+        request._send
+    ) as (read_stream, write_stream):
+
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options()
+        )
+
+
+# Starlette App
 app = Starlette(
     routes=[
-        Route("/mcp", transport.handle_request, methods=["GET", "POST"]),
+        Route("/sse", handle_sse, methods=["GET"]),
+        Mount("/messages", app=sse.handle_post_message),
+    ],
+    middleware=[
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     ]
 )
 
-# -------------------------
-# RUN
-# -------------------------
+# Run
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
