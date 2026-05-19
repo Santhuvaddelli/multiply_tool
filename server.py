@@ -1,8 +1,9 @@
 import os
-import asyncio
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import Route
 from starlette.responses import Response
 
@@ -45,50 +46,41 @@ async def handle_call_tool(name: str, arguments: dict):
         ]
     raise ValueError(f"Unknown tool: {name}")
 
-# 3. Create the SSE transport global instance
+# 3. Create the SSE transport instance mapping to '/messages'
 sse_transport = SseServerTransport("/messages")
 
-# 4. Handle the continuous SSE GET stream
+# 4. Correctly map the Starlette endpoints using SDK abstractions
 async def handle_sse(request):
-    async def sse_stream_generator():
-        # This keeps the connection open and streams data to the client
-        async for message in sse_transport.connect_scope(request.scope, request.receive, request._send):
-            yield message
-
-    # Run the MCP server engine in the background for this stream
-    asyncio.create_task(
-        app_server.run(
-            sse_transport.read_stream,
-            sse_transport.write_stream,
+    async with sse_transport.connect_scope(request.scope, request.receive, request._send) as (read_stream, write_stream):
+        await app_server.run(
+            read_stream,
+            write_stream,
             app_server.create_initialization_options()
         )
-    )
-    
-    # Return standard SSE headers
-    return Response(
-        sse_stream_generator(), 
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no" # Crucial for cloud platforms like Render
-        }
-    )
 
-# 5. Handle the incoming HTTP POST messages from the inspector/client
 async def handle_messages(request):
     await sse_transport.handle_post_message(request.scope, request.receive, request._send)
-    return Response("Message received", status_code=202)
 
-# 6. Starlette Application Setup
+# 5. Enable CORS middleware so your local browser/Inspector can connect safely
+middleware = [
+    Middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Allows the MCP Inspector on localhost to talk to Render
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
+]
+
+# 6. Build the Starlette App with routes and middleware
 app = Starlette(
     routes=[
         Route("/sse", endpoint=handle_sse, methods=["GET"]),
         Route("/messages", endpoint=handle_messages, methods=["POST"]),
-    ]
+    ],
+    middleware=middleware
 )
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
