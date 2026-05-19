@@ -4,8 +4,7 @@ from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.routing import Route
-from starlette.responses import Response
+from starlette.routing import Route, Mount
 
 # 1. Initialize the MCP Server
 app_server = Server("multiplier-server")
@@ -49,17 +48,14 @@ async def handle_call_tool(name: str, arguments: dict):
 # 3. Create the SSE transport instance mapping to '/messages'
 sse_transport = SseServerTransport("/messages")
 
-# 4. Correctly map the Starlette endpoints using SDK abstractions
+# 4. Correctly handle the SSE endpoint using connect_sse
 async def handle_sse(request):
-    async with sse_transport.connect_scope(request.scope, request.receive, request._send) as (read_stream, write_stream):
+    async with sse_transport.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
         await app_server.run(
             read_stream,
             write_stream,
             app_server.create_initialization_options()
         )
-
-async def handle_messages(request):
-    await sse_transport.handle_post_message(request.scope, request.receive, request._send)
 
 # 5. Enable CORS middleware so your local browser/Inspector can connect safely
 middleware = [
@@ -71,11 +67,12 @@ middleware = [
     )
 ]
 
-# 6. Build the Starlette App with routes and middleware
+# 6. Build the Starlette App
+# Note: sse_transport.handle_post_message acts as its own ASGI app for the Mount route
 app = Starlette(
     routes=[
         Route("/sse", endpoint=handle_sse, methods=["GET"]),
-        Route("/messages", endpoint=handle_messages, methods=["POST"]),
+        Mount("/messages", app=sse_transport.handle_post_message),
     ],
     middleware=middleware
 )
