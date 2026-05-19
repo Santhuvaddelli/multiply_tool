@@ -1,8 +1,10 @@
 import os
+import asyncio
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.routing import Route
+from starlette.responses import Response
 
 # 1. Initialize the MCP Server
 app_server = Server("multiplier-server")
@@ -43,21 +45,42 @@ async def handle_call_tool(name: str, arguments: dict):
         ]
     raise ValueError(f"Unknown tool: {name}")
 
-# 3. Set up the SSE Transport endpoints for Render
-sse_transport = SseServerTransport("/sse")
+# 3. Create the SSE transport global instance
+sse_transport = SseServerTransport("/messages")
 
+# 4. Handle the continuous SSE GET stream
 async def handle_sse(request):
-    async with sse_transport.connect_scope(request.scope, request.receive, request._send):
-        await app_server.run(
+    async def sse_stream_generator():
+        # This keeps the connection open and streams data to the client
+        async for message in sse_transport.connect_scope(request.scope, request.receive, request._send):
+            yield message
+
+    # Run the MCP server engine in the background for this stream
+    asyncio.create_task(
+        app_server.run(
             sse_transport.read_stream,
             sse_transport.write_stream,
             app_server.create_initialization_options()
         )
+    )
+    
+    # Return standard SSE headers
+    return Response(
+        sse_stream_generator(), 
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no" # Crucial for cloud platforms like Render
+        }
+    )
 
+# 5. Handle the incoming HTTP POST messages from the inspector/client
 async def handle_messages(request):
     await sse_transport.handle_post_message(request.scope, request.receive, request._send)
+    return Response("Message received", status_code=202)
 
-# 4. Wrap it in a Starlette application for production hosting
+# 6. Starlette Application Setup
 app = Starlette(
     routes=[
         Route("/sse", endpoint=handle_sse, methods=["GET"]),
@@ -67,6 +90,5 @@ app = Starlette(
 
 if __name__ == "__main__":
     import uvicorn
-    # Render provides a PORT environment variable dynamically
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
